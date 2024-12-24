@@ -1,0 +1,194 @@
+import os
+import tkinter as tk
+from tkinter import messagebox
+import ctypes
+from cryptography.fernet import Fernet
+import shutil
+
+# Константы
+DATA_DIR = "flash_lock_data"  # Директория для хранения данных о блокировке
+MASK_DIR = "flash_lock_masked"  # Директория для скрытых файлов (маски)
+MASK_EXTENSION = ".locked"  # Расширение для "зашифрованных" файлов
+
+
+# Проверка прав администратора
+def is_admin():
+    try:
+        return os.getuid() == 0
+    except AttributeError:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+
+
+# Получение файлов флага и пароля для конкретного диска
+def get_files(drive_letter):
+    flag_file = os.path.join(DATA_DIR, f"lock_flag_{drive_letter}.enc")
+    password_file = os.path.join(DATA_DIR, f"password_{drive_letter}.enc")
+    return flag_file, password_file
+
+
+# Наложение маски (перемещение файлов в скрытую директорию)
+def apply_mask(drive_letter):
+    drive_path = f"{drive_letter}\\"
+    masked_path = os.path.join(MASK_DIR, drive_letter)
+
+    if not os.path.exists(masked_path):
+        os.makedirs(masked_path)  # Создаем скрытую директорию для данного диска, если она не существует
+
+    for root, dirs, files in os.walk(drive_path):
+        for file in files:
+            file_path = os.path.join(root, file)
+            masked_file_path = os.path.join(masked_path, file + MASK_EXTENSION)
+            try:
+                shutil.move(file_path, masked_file_path)  # Перемещаем файл в скрытую директорию
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Ошибка при скрытии файла {file}: {str(e)}")
+                return
+
+
+# Снятие маски (перемещение файлов обратно)
+def remove_mask(drive_letter):
+    masked_path = os.path.join(MASK_DIR, drive_letter)
+    if not os.path.exists(masked_path):
+        messagebox.showerror("Ошибка", f"Не найдены скрытые файлы для диска {drive_letter}.")
+        return
+
+    drive_path = f"{drive_letter}\\"
+    for root, dirs, files in os.walk(masked_path):
+        for file in files:
+            masked_file_path = os.path.join(root, file)
+            original_file_path = os.path.join(drive_path, file[:-len(MASK_EXTENSION)])  # Убираем расширение .locked
+            try:
+                shutil.move(masked_file_path, original_file_path)  # Перемещаем файл обратно
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Ошибка при восстановлении файла {file}: {str(e)}")
+                return
+
+
+# Блокировка диска
+def lock_drive():
+    if not is_admin():
+        messagebox.showerror("Ошибка", "Для блокировки диска требуются административные права.")
+        return
+
+    drive_letter = drive_entry.get()
+    password = password_entry.get()
+    confirm_password = confirm_password_entry.get()
+
+    if not password:
+        messagebox.showerror("Ошибка", "Пароль не введён.")
+        return
+
+    if password != confirm_password:
+        messagebox.showerror("Ошибка", "Пароли не совпадают.")
+        return
+
+    # Создаем папку для хранения данных, если её нет
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
+
+    flag_file, password_file = get_files(drive_letter)
+
+    if os.path.exists(flag_file):
+        try:
+            with open(flag_file, "rb") as lock_file:
+                lock_key = lock_file.read()
+
+            cipher_suite = Fernet(lock_key)
+            with open(password_file, "rb") as password_file_obj:
+                encrypted_password = password_file_obj.read()
+
+            existing_password = cipher_suite.decrypt(encrypted_password).decode('utf-8')
+            if password != existing_password:
+                messagebox.showerror("Ошибка", "Диск уже заблокирован с другим паролем.")
+                return
+        except(ValueError, TypeError):
+            messagebox.showerror("Ошибка", "Не удалось расшифровать данные. Попробуйте снять блокировку вручную.")
+            return
+
+            # Генерация ключа и шифрование пароля
+    key = Fernet.generate_key()
+    cipher_suite = Fernet(key)
+    encrypted_password = cipher_suite.encrypt(password.encode('utf-8'))
+    with open(flag_file, "wb") as lock_file:
+        lock_file.write(key)
+    with open(password_file, "wb") as password_file_obj:
+        password_file_obj.write(encrypted_password)
+
+    # Наложение маски на файлы
+    apply_mask(drive_letter)
+    messagebox.showinfo("Успешно", f"Диск {drive_letter} заблокирован. Файлы скрыты.")
+
+    password_entry.delete(0, tk.END)
+    confirm_password_entry.delete(0, tk.END)
+
+
+# Разблокировка диска
+def unlock_drive():
+    if not is_admin():
+        messagebox.showerror("Ошибка", "Для разблокировки диска требуются административные права.")
+        return
+
+    drive_letter = drive_entry.get()
+    password = password_entry.get()
+
+    if not password:
+        messagebox.showerror("Ошибка", "Пароль не введён.")
+        return
+
+    flag_file, password_file = get_files(drive_letter)
+
+    if not os.path.exists(flag_file):
+        messagebox.showerror("Ошибка", f"Диск {drive_letter} не заблокирован.")
+        return
+
+    with open(flag_file, "rb") as lock_file:
+        lock_key = lock_file.read()
+
+    cipher_suite = Fernet(lock_key)
+    with open(password_file, "rb") as password_file_obj:
+        encrypted_password = password_file_obj.read()
+
+    decrypted_password = cipher_suite.decrypt(encrypted_password).decode('utf-8')
+
+    if password != decrypted_password:
+        messagebox.showerror("Ошибка", "Неверный пароль.")
+        return
+
+    # Снятие маски с файлов
+    remove_mask(drive_letter)
+    os.remove(flag_file)
+    os.remove(password_file)
+    messagebox.showinfo("Успешно", f"Диск {drive_letter} разблокирован. Файлы восстановлены.")
+
+    password_entry.delete(0, tk.END)
+
+
+# Интерфейс
+root = tk.Tk()
+root.title("Управление флешками")
+
+drive_label = tk.Label(root, text="Буква диска:")
+drive_label.pack(pady=10)
+
+drive_entry = tk.Entry(root, width=5)
+drive_entry.pack()
+
+password_label = tk.Label(root, text="Пароль:")
+password_label.pack(pady=5)
+
+password_entry = tk.Entry(root, show='*')
+password_entry.pack()
+
+confirm_password_label = tk.Label(root, text="Подтвердите пароль:")
+confirm_password_label.pack(pady=5)
+
+confirm_password_entry = tk.Entry(root, show='*')
+confirm_password_entry.pack()
+
+lock_button = tk.Button(root, text="Заблокировать диск", command=lock_drive)
+lock_button.pack(pady=5)
+
+unlock_button = tk.Button(root, text="Разблокировать диск", command=unlock_drive)
+unlock_button.pack(pady=5)
+
+root.mainloop()
